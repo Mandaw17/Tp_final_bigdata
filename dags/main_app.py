@@ -60,14 +60,14 @@ def download_public_files():
     # 1. Configuration du client
     s3 = boto3.client(
         's3',
-        endpoint_url='http://minio:9000', # Adresse de votre MinIO
-        aws_access_key_id='minoadmin',
-        aws_secret_access_key='minoadmin',
-        region_name='fr-location' # MinIO ignore souvent la région, mais elle est requise par boto3
+        endpoint_url='http://minio:9000',
+        aws_access_key_id='fipfLf3NXA3qdHALpsaW',
+        aws_secret_access_key='BezPqKSXriLa4q13vss1O74VZaT9JPPZdSOg3Rc6',
+        region_name='fr-location'
     )
 
     bucket_name = 'source'
-    object_names = ['Network_logs.csv', 'Times-Series_Network_logs.csv']
+    object_names = ['Network_logs.csv', 'Time-Series_Network_logs.csv']
 
     for object_name in object_names:
         try:
@@ -85,27 +85,53 @@ def clean_logs(input_path: str, output_path: str):
 
     df = df.dropna()
 
+    df.drop(columns=["Port", "Status"], inplace=True)
+
     df.to_csv(output_path, index=False)
 
+def handle_ips(df):
+    import ipaddress
+
+    def is_private(ip):
+        try:
+            return int(ipaddress.ip_address(ip).is_private)
+        except ValueError:
+            return 0
+
+    df["src_ip_private"] = df["Source_IP"].apply(is_private)
+    df["dst_ip_private"] = df["Destination_IP"].apply(is_private)
+
+    df = df.drop(columns=["Source_IP", "Destination_IP"])
+
+    return df
 
 def build_features(input_path: str, output_path: str):
     df = pd.read_csv(input_path)
 
-    df = pd.get_dummies(
-        df[["Request_Type", "Protocol", "User_Agent"]],
-        prefix=["req", "proto", "ua"],
+    df = handle_ips(df)
+
+    cat_cols = ["Request_Type", "Protocol", "User_Agent", "Scan_Type"]
+
+    df_encoded = pd.get_dummies(
+        df[cat_cols],
+        prefix=["req", "proto", "ua", "scan"],
         drop_first=True
     )
+
+    df = df.drop(columns=cat_cols)
+
+    df = pd.concat([df, df_encoded], axis=1)
     
-    df.to_parquet(output_path, index=False)
+    df.head()
+    df.to_csv(output_path, index=False)
 
 
 def train_model(input_path: str, output_path: str):
     labelised_data = pd.read_csv(input_path)
-
+    print(labelised_data.info())
     # set training data
-    X = labelised_data.drop(columns=["Label"])
-    y = labelised_data["Label"]
+    X = labelised_data.drop(columns=["Intrusion"])
+    y = labelised_data["Intrusion"]
 
     # set test data
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
@@ -116,6 +142,12 @@ def train_model(input_path: str, output_path: str):
     # train model
     model.fit(X_train, y_train)
 
+    # predict on test set
+    predictions = model.predict(X_test)
+
+    print("Predictions on test set:", predictions)
+
+    labelised_data.to_csv(output_path, index=False)
     
 
 
@@ -133,6 +165,11 @@ with DAG(
         },
     )
 
+    crete_dirs = BashOperator(
+        task_id="create_raw_dir",
+        bash_command="mkdir -p /tmp/raw /tmp/unzipped /tmp/clean /tmp/features /tmp/model",
+    )
+
     unzip_files = BashOperator(
         task_id="unzip_files",
         bash_command="unzip -o /tmp/raw/*.zip -d /tmp/unzipped/",
@@ -142,7 +179,7 @@ with DAG(
         task_id="clean_data",
         python_callable=clean_logs,
         op_kwargs={
-            "input_path": f"/tmp/unzipped/Network_logs.csv",
+            "input_path": f"Network_logs.csv",
             "output_path": "/tmp/clean/clean_logs.csv",
         },
     )
@@ -177,7 +214,7 @@ with DAG(
         },
     )
 
-    download_data >> clean_data >> feature_engineering >> train_model 
+    download_data  >> clean_data >> feature_engineering >> train_model 
     # >> save_features
 
 
